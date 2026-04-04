@@ -1,0 +1,7 @@
+# Word temp/lock files
+~$*.docx
+~$*.xlsx
+
+# OS
+.DS_Store
+Thumbs.db
