@@ -19,7 +19,9 @@ from contextlib import redirect_stdout, redirect_stderr
 from datetime import datetime
 from pathlib import Path
 
+import time
 import anthropic
+import httpx
 
 # ── Memory directory ──────────────────────────────────────────────────────────
 MEMORY_DIR = Path.home() / ".ma_analyst" / "deals"
@@ -334,13 +336,24 @@ def run_agent(client: anthropic.Anthropic, messages: list, verbose: bool = True)
     """Run the agentic loop until Claude stops calling tools. Returns final text."""
 
     while True:
-        response = client.messages.create(
-            model="claude-opus-4-6",
-            max_tokens=8096,
-            system=SYSTEM,
-            tools=TOOLS,
-            messages=messages,
-        )
+        # Retry up to 3 times on rate limit
+        for attempt in range(3):
+            try:
+                response = client.messages.create(
+                    model="claude-opus-4-6",
+                    max_tokens=8096,
+                    system=SYSTEM,
+                    tools=TOOLS,
+                    messages=messages,
+                )
+                break
+            except anthropic.RateLimitError:
+                wait = 20 * (attempt + 1)
+                print(f"  [rate limit] Waiting {wait}s before retry {attempt+1}/3...")
+                time.sleep(wait)
+        else:
+            print("  [error] Rate limit exceeded after 3 retries. Try again in a minute.")
+            return ""
 
         # Collect text from this response
         text_parts = []
@@ -400,12 +413,29 @@ def main():
     parser.add_argument("--recall", help="Recall a past deal by name", default=None)
     args = parser.parse_args()
 
+    # 1. Try environment variable first
     api_key = os.environ.get("ANTHROPIC_API_KEY")
+
+    # 2. Fall back to Claude Code's stored key automatically
     if not api_key:
-        print("ERROR: Set ANTHROPIC_API_KEY environment variable.")
+        claude_config = Path.home() / ".claude" / "config.json"
+        if claude_config.exists():
+            with open(claude_config) as f:
+                api_key = json.load(f).get("primaryApiKey")
+            if api_key:
+                print("  [key] Using Claude Code API key.")
+
+    if not api_key:
+        print("ERROR: No API key found. Set ANTHROPIC_API_KEY or install Claude Code.")
         sys.exit(1)
 
-    client = anthropic.Anthropic(api_key=api_key)
+    # Corporate networks use SSL inspection proxies — always disable cert verification
+    import urllib3
+    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+    client = anthropic.Anthropic(
+        api_key=api_key,
+        http_client=httpx.Client(verify=False),
+    )
 
     # ── List past deals ──
     if args.deals:
